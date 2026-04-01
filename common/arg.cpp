@@ -406,6 +406,32 @@ static std::string get_all_kv_cache_types() {
     return msg.str();
 }
 
+static llama_memory_codec memory_codec_from_str(const std::string & s) {
+    if (s == "legacy") {
+        return LLAMA_MEMORY_CODEC_LEGACY;
+    }
+    if (s == "turboq") {
+        return LLAMA_MEMORY_CODEC_TURBOQ;
+    }
+    throw std::runtime_error("Unsupported memory codec: " + s);
+}
+
+static const char * memory_codec_name(const llama_memory_codec codec) {
+    switch (codec) {
+        case LLAMA_MEMORY_CODEC_LEGACY:
+            return "legacy";
+        case LLAMA_MEMORY_CODEC_TURBOQ:
+            return "turboq";
+    }
+    GGML_ABORT("fatal error");
+}
+
+static void validate_turboq_bits(const std::string & label, const int value) {
+    if (value < 2 || value > 4) {
+        throw std::runtime_error(label + " must be one of: 2, 3, 4");
+    }
+}
+
 static bool parse_bool_value(const std::string & value) {
     if (is_truthy(value)) {
         return true;
@@ -895,6 +921,15 @@ bool common_params_parse(int argc, char ** argv, common_params & params, llama_e
             common_params_print_completion(ctx_arg);
             exit(0);
         }
+
+        if (ctx_arg.params.memory_codec == LLAMA_MEMORY_CODEC_TURBOQ) {
+            if (ctx_arg.params.cache_type_k != GGML_TYPE_F16 || ctx_arg.params.cache_type_v != GGML_TYPE_F16) {
+                throw std::invalid_argument("TurboQ cannot be combined with non-legacy --cache-type-k/--cache-type-v values");
+            }
+            ctx_arg.params.turboq.attn_k_residual_bits = 1;
+            ctx_arg.params.turboq.rotation = LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN;
+        }
+
         params.lr.init();
     } catch (const std::invalid_argument & ex) {
         fprintf(stderr, "%s\n", ex.what());
@@ -1993,6 +2028,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_HOST"));
     add_opt(common_arg(
+        {"--memory-codec"}, "CODEC",
+        string_format(
+            "Runtime memory codec\n"
+            "allowed values: legacy, turboq\n"
+            "(default: %s)",
+            memory_codec_name(params.memory_codec)
+        ),
+        [](common_params & params, const std::string & value) {
+            params.memory_codec = memory_codec_from_str(value);
+        }
+    ).set_env("LLAMA_ARG_MEMORY_CODEC"));
+    add_opt(common_arg(
         {"-ctk", "--cache-type-k"}, "TYPE",
         string_format(
             "KV cache data type for K\n"
@@ -2018,6 +2065,48 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cache_type_v = kv_cache_type_from_str(value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
+    add_opt(common_arg(
+        {"--turboq-attn-k-bits"}, "BITS",
+        string_format("TurboQ attention-K stage-1 bitwidth (2, 3, or 4; default: %u)", params.turboq.attn_k_bits),
+        [](common_params & params, int value) {
+            validate_turboq_bits("TurboQ attention-K bits", value);
+            params.turboq.attn_k_bits = value;
+        }
+    ).set_env("LLAMA_ARG_TURBOQ_ATTN_K_BITS"));
+    add_opt(common_arg(
+        {"--turboq-attn-v-bits"}, "BITS",
+        string_format("TurboQ attention-V stage-1 bitwidth (2, 3, or 4; default: %u)", params.turboq.attn_v_bits),
+        [](common_params & params, int value) {
+            validate_turboq_bits("TurboQ attention-V bits", value);
+            params.turboq.attn_v_bits = value;
+        }
+    ).set_env("LLAMA_ARG_TURBOQ_ATTN_V_BITS"));
+    add_opt(common_arg(
+        {"--turboq-recurrent-r-bits"}, "BITS",
+        string_format("TurboQ recurrent-R stage-1 bitwidth (2, 3, or 4; default: %u)", params.turboq.recurrent_r_bits),
+        [](common_params & params, int value) {
+            validate_turboq_bits("TurboQ recurrent-R bits", value);
+            params.turboq.recurrent_r_bits = value;
+        }
+    ).set_env("LLAMA_ARG_TURBOQ_RECURRENT_R_BITS"));
+    add_opt(common_arg(
+        {"--turboq-recurrent-s-bits"}, "BITS",
+        string_format("TurboQ recurrent-S stage-1 bitwidth (2, 3, or 4; default: %u)", params.turboq.recurrent_s_bits),
+        [](common_params & params, int value) {
+            validate_turboq_bits("TurboQ recurrent-S bits", value);
+            params.turboq.recurrent_s_bits = value;
+        }
+    ).set_env("LLAMA_ARG_TURBOQ_RECURRENT_S_BITS"));
+    add_opt(common_arg(
+        {"--turboq-seed"}, "N",
+        string_format("TurboQ structured-rotation seed (default: %u)", params.turboq.seed),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::runtime_error("TurboQ seed must be non-negative");
+            }
+            params.turboq.seed = value;
+        }
+    ).set_env("LLAMA_ARG_TURBOQ_SEED"));
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",

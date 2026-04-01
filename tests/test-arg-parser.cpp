@@ -102,6 +102,14 @@ int main(void) {
     argv = {"binary_name", "--no-mmap"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+    // TurboQ cannot be mixed with legacy KV cache surface overrides
+    argv = {"binary_name", "--memory-codec", "turboq", "--cache-type-k", "q8_0"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    // TurboQ bit widths must stay in the supported range
+    argv = {"binary_name", "--memory-codec", "turboq", "--turboq-attn-k-bits", "5"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
 
     printf("test-arg-parser: test valid usage\n\n");
 
@@ -116,6 +124,25 @@ int main(void) {
     argv = {"binary_name", "--verbose"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.verbosity > 1);
+
+    argv = {
+        "binary_name",
+        "--memory-codec", "turboq",
+        "--turboq-attn-k-bits", "4",
+        "--turboq-attn-v-bits", "2",
+        "--turboq-recurrent-r-bits", "3",
+        "--turboq-recurrent-s-bits", "4",
+        "--turboq-seed", "9",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.memory_codec == LLAMA_MEMORY_CODEC_TURBOQ);
+    assert(params.turboq.attn_k_bits == 4);
+    assert(params.turboq.attn_v_bits == 2);
+    assert(params.turboq.recurrent_r_bits == 3);
+    assert(params.turboq.recurrent_s_bits == 4);
+    assert(params.turboq.attn_k_residual_bits == 1);
+    assert(params.turboq.rotation == LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN);
+    assert(params.turboq.seed == 9);
 
     argv = {"binary_name", "-m", "abc.gguf", "--predict", "6789", "--batch-size", "9090"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
