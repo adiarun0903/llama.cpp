@@ -238,6 +238,9 @@ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
 endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
+llama_build_and_test(test-turboq-codec.cpp)
+llama_build_and_test(test-turboq-backend.cpp)
+llama_build_and_test(test-turboq-hybrid-state.cpp)
 
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
@@ -247,6 +250,39 @@ llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
 # Requires a model, uses same args pattern as test-thread-safety
 llama_build_and_test(test-state-restore-fragmented.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
 set_tests_properties(test-state-restore-fragmented PROPERTIES FIXTURES_REQUIRED test-download-model)
+
+llama_test(
+    llama-save-load-state
+    NAME test-save-load-state-turboq
+    LABEL "model"
+    ARGS
+        -m "${MODEL_DEST}"
+        --memory-codec turboq
+        --turboq-attn-k-bits 3
+        --turboq-attn-v-bits 3
+        --turboq-recurrent-r-bits 3
+        --turboq-recurrent-s-bits 3
+        -n 4
+)
+set_tests_properties(test-save-load-state-turboq PROPERTIES FIXTURES_REQUIRED test-download-model)
+
+llama_test(
+    llama-speculative-simple
+    NAME test-speculative-simple-turboq
+    LABEL "model"
+    ARGS
+        -m "${MODEL_DEST}"
+        --model-draft "${MODEL_DEST}"
+        --memory-codec turboq
+        --turboq-attn-k-bits 3
+        --turboq-attn-v-bits 3
+        --turboq-recurrent-r-bits 3
+        --turboq-recurrent-s-bits 3
+        -p "Hello"
+        -n 4
+        -fa on
+)
+set_tests_properties(test-speculative-simple-turboq PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 if (NOT GGML_BACKEND_DL)
     # these tests use the backends directly and cannot be built with dynamic loading
