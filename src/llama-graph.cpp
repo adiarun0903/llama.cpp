@@ -2495,7 +2495,7 @@ ggml_tensor * llm_graph_context::build_recurrent_surface_load(
                    int   il,
                   bool   is_r,
                int32_t   dim) const {
-    const auto * mctx_cur = dynamic_cast<const llama_memory_recurrent_context_i *>(mctx);
+    const auto * mctx_cur = inp->mctx;
     GGML_ASSERT(mctx_cur != nullptr);
 
     const int64_t n_seqs = ubatch.n_seqs;
@@ -2528,7 +2528,7 @@ ggml_tensor * llm_graph_context::build_recurrent_surface_store(
                    int   il,
                   bool   is_r,
                int32_t   dim) const {
-    const auto * mctx_cur = dynamic_cast<const llama_memory_recurrent_context_i *>(mctx);
+    const auto * mctx_cur = inp->mctx;
     GGML_ASSERT(mctx_cur != nullptr);
 
     const int64_t n_seqs = ubatch.n_seqs;
@@ -2538,7 +2538,8 @@ ggml_tensor * llm_graph_context::build_recurrent_surface_store(
         GGML_ASSERT(turboq.dim == dim);
 
         ggml_tensor * row_map = ggml_view_2d(ctx0, inp->row_map, GGML_TURBOQ_ROW_FIELD_COUNT, n_seqs, inp->row_map->nb[1], 0);
-        ggml_tensor * state_flat = ggml_reshape_2d(ctx0, state, dim, n_seqs);
+        ggml_tensor * state_cont = ggml_is_contiguous(state) ? state : ggml_cont(ctx0, state);
+        ggml_tensor * state_flat = ggml_reshape_2d(ctx0, state_cont, dim, n_seqs);
         mctx_cur->turboq_mark_store_surface(il, is_r);
         return ggml_turboq_recurrent_store(
                 ctx0,

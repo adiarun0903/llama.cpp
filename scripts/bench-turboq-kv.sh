@@ -4,7 +4,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${ROOT_DIR}/build/bin"
-CLI_BIN="${BIN_DIR}/llama-cli"
+COMPLETION_BIN="${BIN_DIR}/llama-completion"
+CLI_BIN="${COMPLETION_BIN}"
+if [[ ! -x "$CLI_BIN" ]]; then
+    CLI_BIN="${BIN_DIR}/llama-cli"
+fi
 PPL_BIN="${BIN_DIR}/llama-perplexity"
 
 MODEL=""
@@ -12,6 +16,7 @@ PROMPT="The meaning of life is"
 CTX_SIZE=2048
 N_PREDICT=128
 SEED=123
+TEMPERATURE=0.8
 FLASH_ATTN="on"
 THREADS=""
 PERPLEXITY_FILE=""
@@ -25,10 +30,11 @@ Compare legacy memory modes against TurboQ on a causal GGUF.
 
 Options:
   --model PATH             GGUF model path (required)
-  --prompt TEXT            Prompt for llama-cli runs (default: ${PROMPT})
+  --prompt TEXT            Prompt for completion runs (default: ${PROMPT})
   --ctx-size N             Context size (default: ${CTX_SIZE})
   --n-predict N            Number of generated tokens (default: ${N_PREDICT})
   --seed N                 Sampling seed (default: ${SEED})
+  --temp V                 Sampling temperature for completion runs (default: ${TEMPERATURE})
   --threads N              CPU threads to pass through
   --flash-attn on|off|auto Flash attention mode for llama-cli/perplexity (default: ${FLASH_ATTN})
   --perplexity-file PATH   Optional text file for llama-perplexity
@@ -72,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             SEED="$2"
             shift 2
             ;;
+        --temp)
+            TEMPERATURE="$2"
+            shift 2
+            ;;
         --threads)
             THREADS="$2"
             shift 2
@@ -106,7 +116,7 @@ if [[ -z "$MODEL" ]]; then
     exit 1
 fi
 
-require_bin "$CLI_BIN" "llama-cli"
+require_bin "$CLI_BIN" "$(basename "$CLI_BIN")"
 if [[ -n "$PERPLEXITY_FILE" ]]; then
     require_bin "$PPL_BIN" "llama-perplexity"
 fi
@@ -118,6 +128,7 @@ COMMON_ARGS=(
     -c "$CTX_SIZE"
     --seed "$SEED"
     -fa "$FLASH_ATTN"
+    --no-warmup
 )
 
 if [[ -n "$THREADS" ]]; then
@@ -129,15 +140,20 @@ run_cli_case() {
     shift
 
     local log_path="${OUT_DIR}/${name}.cli.log"
-    echo "==> ${name} (llama-cli)"
+    local -a completion_mode_args=()
+    if [[ "$(basename "$CLI_BIN")" == "llama-completion" ]]; then
+        completion_mode_args+=(-no-cnv)
+    fi
+    echo "==> ${name} ($(basename "$CLI_BIN"))"
     "$CLI_BIN" \
         "${COMMON_ARGS[@]}" \
         -p "$PROMPT" \
         -n "$N_PREDICT" \
-        -no-cnv -st \
-        --temp 0 \
+        "${completion_mode_args[@]}" \
+        --temp "$TEMPERATURE" \
         "$@" \
-        2>&1 | tee "$log_path"
+        > "$log_path" 2>&1
+    tail -n 40 "$log_path"
 }
 
 run_ppl_case() {
@@ -154,7 +170,8 @@ run_ppl_case() {
         "${COMMON_ARGS[@]}" \
         -f "$PERPLEXITY_FILE" \
         "$@" \
-        2>&1 | tee "$log_path"
+        > "$log_path" 2>&1
+    tail -n 40 "$log_path"
 }
 
 run_case() {

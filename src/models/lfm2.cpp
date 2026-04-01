@@ -8,7 +8,6 @@ llm_build_lfm2<iswa>::llm_build_lfm2(const llama_model & model, const llm_graph_
     llm_graph_context(params) {
     using inp_hybrid_type = std::conditional_t<iswa, llm_graph_input_mem_hybrid_iswa,  llm_graph_input_mem_hybrid>;
     using inp_attn_type   = std::conditional_t<iswa, llm_graph_input_attn_kv_iswa,     llm_graph_input_attn_kv>;
-    using mem_hybrid_ctx  = std::conditional_t<iswa, llama_memory_hybrid_iswa_context, llama_memory_hybrid_context>;
 
     // lambda helpers for readability
     auto build_dense_feed_forward = [&model, this](ggml_tensor * cur, int il) -> ggml_tensor * {
@@ -76,8 +75,6 @@ llm_build_lfm2<iswa>::llm_build_lfm2(const llama_model & model, const llm_graph_
     auto build_shortconv_block = [&model, this](ggml_tensor *        cur,
                                                 llm_graph_input_rs * inp_recr,
                                                 int                  il) -> ggml_tensor * {
-        const auto * mctx_cur = static_cast<const mem_hybrid_ctx *>(mctx)->get_recr();
-        const uint32_t kv_head      = mctx_cur->get_head();
         const int64_t  n_seq_tokens = ubatch.n_seq_tokens;
         const int64_t  n_seqs       = ubatch.n_seqs;
         GGML_ASSERT(n_seqs != 0);
@@ -106,8 +103,11 @@ llm_build_lfm2<iswa>::llm_build_lfm2(const llama_model & model, const llm_graph_
         auto * bx = ggml_transpose(ctx0, ggml_mul(ctx0, b, x));
 
         // read conv state
-        auto * conv_state = mctx_cur->get_r_l(il);
-        auto * conv_rs    = build_rs(inp_recr, conv_state, hparams.n_embd_r(), n_seqs);
+        auto * conv_rs = build_recurrent_surface_load(
+                inp_recr, ubatch,
+                il,
+                /*is_r=*/true,
+                hparams.n_embd_r());
         auto * conv       = ggml_reshape_3d(ctx0, conv_rs, d_conv, hparams.n_embd, n_seqs);
 
         bx = ggml_concat(ctx0, conv, bx, 0);
@@ -119,9 +119,13 @@ llm_build_lfm2<iswa>::llm_build_lfm2(const llama_model & model, const llm_graph_
         GGML_ASSERT(ggml_are_same_shape(conv, new_conv));
 
         // write new conv conv state
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, new_conv,
-                                               ggml_view_1d(ctx0, conv_state, ggml_nelements(new_conv),
-                                                            kv_head * d_conv * n_embd * ggml_element_size(new_conv))));
+        ggml_build_forward_expand(gf, build_recurrent_surface_store(
+                inp_recr,
+                new_conv,
+                ubatch,
+                il,
+                /*is_r=*/true,
+                hparams.n_embd_r()));
 
         auto * conv_kernel = model.layers[il].shortconv.conv;
         auto * conv_out    = ggml_ssm_conv(ctx0, bx, conv_kernel);
