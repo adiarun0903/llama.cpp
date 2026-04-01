@@ -198,6 +198,7 @@ add_library(ggml-base
             ../include/gguf.h
             ggml.c
             ggml.cpp
+            ggml-turboq.cpp
             ggml-alloc.c
             ggml-backend.cpp
             ggml-opt.cpp
@@ -205,6 +206,7 @@ add_library(ggml-base
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
+            ggml-turboq.hpp
             gguf.cpp)
 
 set_target_properties(ggml-base PROPERTIES

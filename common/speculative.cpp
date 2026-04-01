@@ -999,6 +999,10 @@ llama_tokens common_speculative_draft(
         llama_token id_last) {
     llama_tokens result;
 
+    if (spec == nullptr) {
+        return result;
+    }
+
     spec->curr_impl = nullptr; // reset current implementation
 
     for (auto & impl : spec->impls) {
@@ -1025,6 +1029,10 @@ llama_tokens common_speculative_draft(
 }
 
 void common_speculative_accept(common_speculative * spec, uint16_t n_accepted) {
+    if (spec == nullptr) {
+        return;
+    }
+
     if (n_accepted == 0) {
         return;
     }

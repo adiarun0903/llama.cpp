@@ -546,6 +546,17 @@ struct common_params {
 
     bool single_turn       = false; // single turn chat conversation
 
+    llama_memory_codec memory_codec = LLAMA_MEMORY_CODEC_LEGACY; // runtime memory codec
+    llama_turboq_memory_params turboq = {
+        /*.attn_k_bits          =*/ 3,
+        /*.attn_v_bits          =*/ 3,
+        /*.recurrent_r_bits     =*/ 3,
+        /*.recurrent_s_bits     =*/ 3,
+        /*.attn_k_residual_bits =*/ 1,
+        /*.seed                 =*/ 1,
+        /*.rotation             =*/ LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN,
+    };
+
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 

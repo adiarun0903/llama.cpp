@@ -124,7 +124,46 @@ private:
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
 };
 
-class llama_memory_recurrent_context : public llama_memory_context_i {
+class llama_memory_recurrent_context_i {
+public:
+    struct turboq_surface {
+        ggml_tensor * codes = nullptr;
+        ggml_tensor * norms = nullptr;
+        int32_t surface_kind = 0;
+        int32_t seed = 0;
+        int32_t layer_index = 0;
+        int32_t bits = 0;
+        int32_t dim = 0;
+    };
+
+    virtual ~llama_memory_recurrent_context_i() = default;
+
+    virtual uint32_t get_n_rs() const = 0;
+    virtual uint32_t get_head() const = 0;
+    virtual int32_t  get_rs_z() const = 0;
+    virtual uint32_t get_size() const = 0;
+
+    virtual ggml_tensor * get_r_l(int32_t il) const = 0;
+    virtual ggml_tensor * get_s_l(int32_t il) const = 0;
+
+    virtual int32_t s_copy(int i) const = 0;
+
+    virtual const void * graph_reuse_key() const = 0;
+
+    virtual bool turboq_get_surface(int32_t il, bool is_r, turboq_surface & out) const {
+        (void) il;
+        (void) is_r;
+        (void) out;
+        return false;
+    }
+
+    virtual void turboq_mark_store_surface(int32_t il, bool is_r) const {
+        (void) il;
+        (void) is_r;
+    }
+};
+
+class llama_memory_recurrent_context : public llama_memory_context_i, public llama_memory_recurrent_context_i {
 public:
     // used for errors
     llama_memory_recurrent_context(llama_memory_status status);
@@ -154,15 +193,17 @@ public:
     // llama_memory_recurrent_context specific API
     //
 
-    uint32_t get_n_rs() const;
-    uint32_t get_head() const;
-    int32_t  get_rs_z() const;
-    uint32_t get_size() const;
+    uint32_t get_n_rs() const override;
+    uint32_t get_head() const override;
+    int32_t  get_rs_z() const override;
+    uint32_t get_size() const override;
 
-    ggml_tensor * get_r_l(int32_t il) const;
-    ggml_tensor * get_s_l(int32_t il) const;
+    ggml_tensor * get_r_l(int32_t il) const override;
+    ggml_tensor * get_s_l(int32_t il) const override;
 
-    int32_t s_copy(int i) const;
+    int32_t s_copy(int i) const override;
+
+    const void * graph_reuse_key() const override;
 
 private:
     const llama_memory_status status;

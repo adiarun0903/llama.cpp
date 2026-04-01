@@ -45,6 +45,16 @@ const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_ty
     GGML_ABORT("fatal error");
 }
 
+const char * llama_memory_codec_name(enum llama_memory_codec memory_codec) {
+    switch (memory_codec) {
+        case LLAMA_MEMORY_CODEC_LEGACY:
+            return "legacy";
+        case LLAMA_MEMORY_CODEC_TURBOQ:
+            return "turboq";
+    }
+    GGML_ABORT("fatal error");
+}
+
 struct llama_device_memory_data {
     int64_t total;
     int64_t free;
@@ -1217,4 +1227,3 @@ const char * llama_print_system_info(void) {
 
     return s.c_str();
 }
-

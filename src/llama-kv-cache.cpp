@@ -30,7 +30,8 @@ llama_kv_cache::llama_kv_cache(
                  uint32_t   n_swa,
            llama_swa_type   swa_type,
     const layer_filter_cb & filter,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                     bool   alloc_tensors) :
     model(model), hparams(model.hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
 
@@ -48,6 +49,10 @@ llama_kv_cache::llama_kv_cache(
 
     // create a context for each buffer type
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
+        if (!alloc_tensors) {
+            return nullptr;
+        }
+
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
@@ -127,26 +132,32 @@ llama_kv_cache::llama_kv_cache(
 
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
 
-        ggml_context * ctx = ctx_for_buft(buft);
-        if (!ctx) {
+        ggml_context * ctx = alloc_tensors ? ctx_for_buft(buft) : nullptr;
+        if (alloc_tensors && !ctx) {
             throw std::runtime_error("failed to create ggml context for kv cache");
         }
 
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * k = alloc_tensors && has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * v = alloc_tensors && has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
-        has_k && ggml_format_name(k, "cache_k_l%d", il);
-        has_v && ggml_format_name(v, "cache_v_l%d", il);
+        if (k) {
+            ggml_format_name(k, "cache_k_l%d", il);
+        }
+        if (v) {
+            ggml_format_name(v, "cache_v_l%d", il);
+        }
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
-        for (uint32_t s = 0; s < n_stream; ++s) {
-            k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
-            v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
+        if (alloc_tensors) {
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
+                v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
+            }
         }
 
         map_layer_ids[il] = layers.size();
@@ -178,25 +189,27 @@ llama_kv_cache::llama_kv_cache(
         }
     }
 
-    // allocate tensors and initialize the buffers to avoid NaNs in the padding
-    for (auto & [buft, ctx] : ctx_map) {
-        ggml_backend_buffer_t buf;
-        if (model.hparams.no_alloc) {
-            buf = ggml_backend_buft_alloc_buffer(buft, /*size =*/ 0); // dummy buffer
-            for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr; t = ggml_get_next_tensor(ctx.get(), t)) {
-                t->buffer = buf; // set dummy buffer for KV cache so that the backend scheduler won't try to allocate it
+    if (alloc_tensors) {
+        // allocate tensors and initialize the buffers to avoid NaNs in the padding
+        for (auto & [buft, ctx] : ctx_map) {
+            ggml_backend_buffer_t buf;
+            if (model.hparams.no_alloc) {
+                buf = ggml_backend_buft_alloc_buffer(buft, /*size =*/ 0); // dummy buffer
+                for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr; t = ggml_get_next_tensor(ctx.get(), t)) {
+                    t->buffer = buf; // set dummy buffer for KV cache so that the backend scheduler won't try to allocate it
+                }
+            } else {
+                buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft); // real buffer
             }
-        } else {
-            buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft); // real buffer
-        }
-        if (!buf) {
-            throw std::runtime_error("failed to allocate buffer for kv cache");
-        }
+            if (!buf) {
+                throw std::runtime_error("failed to allocate buffer for kv cache");
+            }
 
-        LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
+            LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
 
-        ggml_backend_buffer_clear(buf, 0);
-        ctxs_bufs.emplace_back(std::move(ctx), buf);
+            ggml_backend_buffer_clear(buf, 0);
+            ctxs_bufs.emplace_back(std::move(ctx), buf);
+        }
     }
 
     {
@@ -1020,7 +1033,9 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     return result;
 }
 
-ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, ggml_tensor * dep) const {
+    GGML_UNUSED(dep);
+
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * k = layers[ikv].k;
@@ -1040,7 +1055,9 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
 }
 
-ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo, ggml_tensor * dep) const {
+    GGML_UNUSED(dep);
+
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * v = layers[ikv].v;
@@ -1070,6 +1087,28 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(v->type, kv_size),                        // v->nb[2]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa),           // v->nb[3]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
+}
+
+ggml_tensor * llama_kv_cache::get_k_corr(
+        ggml_context * ctx,
+         ggml_tensor * q,
+              int32_t   il,
+        const slot_info & sinfo,
+         ggml_tensor * dep) const {
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(q);
+    GGML_UNUSED(il);
+    GGML_UNUSED(sinfo);
+    GGML_UNUSED(dep);
+    return nullptr;
+}
+
+bool llama_kv_cache::prefers_flash_attn() const {
+    return true;
+}
+
+bool llama_kv_cache::force_cpu_kqv() const {
+    return false;
 }
 
 ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
@@ -1521,7 +1560,7 @@ size_t llama_kv_cache::size_k_bytes() const {
     size_t size_k_bytes = 0;
 
     for (const auto & layer : layers) {
-        size_k_bytes += ggml_nbytes(layer.k);
+        size_k_bytes += layer.k ? ggml_nbytes(layer.k) : 0;
     }
 
     return size_k_bytes;
@@ -2239,12 +2278,16 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
-ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
-    return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
+ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il, ggml_tensor * dep) const {
+    return kv->get_k(ctx, il, n_kv, sinfos[i_cur], dep);
 }
 
-ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
-    return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
+ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il, ggml_tensor * dep) const {
+    return kv->get_v(ctx, il, n_kv, sinfos[i_cur], dep);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_corr(ggml_context * ctx, ggml_tensor * q, int32_t il, ggml_tensor * dep) const {
+    return kv->get_k_corr(ctx, q, il, sinfos[i_cur], dep);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
@@ -2281,4 +2324,12 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+bool llama_kv_cache_context::prefers_flash_attn() const {
+    return kv->prefers_flash_attn();
+}
+
+bool llama_kv_cache_context::force_cpu_kqv() const {
+    return kv->force_cpu_kqv();
 }

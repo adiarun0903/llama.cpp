@@ -273,9 +273,11 @@ llama_context::llama_context(
     // init the memory module
     if (!hparams.vocab_only) {
         llama_memory_params params_mem = {
-            /*.type_k   =*/ params.type_k,
-            /*.type_v   =*/ params.type_v,
-            /*.swa_full =*/ params.swa_full,
+            /*.type_k      =*/ params.type_k,
+            /*.type_v      =*/ params.type_v,
+            /*.memory_codec=*/ params.memory_codec,
+            /*.turboq      =*/ params.turboq,
+            /*.swa_full    =*/ params.swa_full,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -346,7 +348,7 @@ llama_context::llama_context(
 
         sched_reserve();
 
-        if (!cparams.flash_attn) {
+        if (params.memory_codec == LLAMA_MEMORY_CODEC_LEGACY && !cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {
                 throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
             }
@@ -2904,6 +2906,16 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.memory_codec                =*/ LLAMA_MEMORY_CODEC_LEGACY,
+        /*.turboq                      =*/ {
+            /*.attn_k_bits          =*/ 3,
+            /*.attn_v_bits          =*/ 3,
+            /*.recurrent_r_bits     =*/ 3,
+            /*.recurrent_s_bits     =*/ 3,
+            /*.attn_k_residual_bits =*/ 1,
+            /*.seed                 =*/ 1,
+            /*.rotation             =*/ LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN,
+        },
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
@@ -2942,6 +2954,57 @@ llama_context * llama_init_from_model(
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     }
 
+    if (params.memory_codec == LLAMA_MEMORY_CODEC_TURBOQ) {
+        if (params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16) {
+            LLAMA_LOG_ERROR("%s: TurboQ must use legacy F16 cache tensor types internally\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.attn_k_bits < 2 || params.turboq.attn_k_bits > 4) {
+            LLAMA_LOG_ERROR("%s: TurboQ attention K bits must be one of: 2, 3, 4\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.attn_v_bits < 2 || params.turboq.attn_v_bits > 4) {
+            LLAMA_LOG_ERROR("%s: TurboQ attention V bits must be one of: 2, 3, 4\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.recurrent_r_bits < 2 || params.turboq.recurrent_r_bits > 4) {
+            LLAMA_LOG_ERROR("%s: TurboQ recurrent R bits must be one of: 2, 3, 4\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.recurrent_s_bits < 2 || params.turboq.recurrent_s_bits > 4) {
+            LLAMA_LOG_ERROR("%s: TurboQ recurrent S bits must be one of: 2, 3, 4\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.attn_k_residual_bits != 1) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 currently requires attn_k_residual_bits == 1\n", __func__);
+            return nullptr;
+        }
+        if (params.turboq.rotation != LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 currently only supports structured Hadamard-permute-sign rotation\n", __func__);
+            return nullptr;
+        }
+        if (!model->hparams.causal_attn) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 only supports causal decoder attention\n", __func__);
+            return nullptr;
+        }
+        if (model->hparams.dec_n_layer != 0) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 does not support encoder-decoder models\n", __func__);
+            return nullptr;
+        }
+        if (model->hparams.is_mla()) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 does not support MLA models\n", __func__);
+            return nullptr;
+        }
+        if (llm_arch_is_recurrent(model->arch)) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 does not yet support pure recurrent architectures\n", __func__);
+            return nullptr;
+        }
+        if (model->hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+            LLAMA_LOG_ERROR("%s: TurboQ v2 does not support sliding-window attention cache variants\n", __func__);
+            return nullptr;
+        }
+    }
+
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
@@ -2964,7 +3027,9 @@ llama_context * llama_init_from_model(
         }
     }
 
-    if (ggml_is_quantized(params.type_v) && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+    if (params.memory_codec == LLAMA_MEMORY_CODEC_LEGACY &&
+        ggml_is_quantized(params.type_v) &&
+        params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
         LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
         return nullptr;
     }

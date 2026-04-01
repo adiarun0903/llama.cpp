@@ -125,7 +125,7 @@ public:
     //
 
     const llama_kv_cache_iswa_context * get_attn() const;
-    const llama_memory_recurrent_context * get_recr() const;
+    const llama_memory_recurrent_context_i * get_recr() const;
 
 private:
     // the index of the next ubatch to process

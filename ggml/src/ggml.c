@@ -1040,6 +1040,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "RWKV_WKV7",
     "SOLVE_TRI",
     "GATED_DELTA_NET",
+    "TURBOQ_ATTN_DECODE",
+    "TURBOQ_ATTN_KCORR",
+    "TURBOQ_RECURRENT_LOAD",
+    "TURBOQ_RECURRENT_STORE",
 
     "UNARY",
 
@@ -1057,7 +1061,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1150,6 +1154,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rwkv_wkv7(r, w, k, v, a, b, s)",
     "A X = B, A triangular, solve X",
     "gated_delta_net(q, k, v, g, beta, s)",
+    "turboq_attn_decode(row_map, packed)",
+    "turboq_attn_kcorr(q, row_map, packed)",
+    "turboq_recurrent_load(row_map, packed)",
+    "turboq_recurrent_store(values, row_map, packed)",
 
     "unary(x)",
 
@@ -1167,7 +1175,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6190,6 +6198,166 @@ struct ggml_tensor * ggml_gated_delta_net(
     result->src[3] = g;
     result->src[4] = beta;
     result->src[5] = state;
+
+    return result;
+}
+
+static struct ggml_turboq_op_params ggml_make_turboq_op_params(
+        int32_t surface_kind,
+        int32_t seed,
+        int32_t layer_index,
+        int32_t bits,
+        int32_t dim,
+        int32_t n_heads,
+        int32_t flags) {
+    return (struct ggml_turboq_op_params) {
+        /*.layout_version =*/ 1,
+        /*.surface_kind   =*/ surface_kind,
+        /*.seed           =*/ seed,
+        /*.layer_index    =*/ layer_index,
+        /*.bits           =*/ bits,
+        /*.dim            =*/ dim,
+        /*.n_heads        =*/ n_heads,
+        /*.flags          =*/ flags,
+    };
+}
+
+struct ggml_tensor * ggml_turboq_attn_decode(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * row_map,
+        struct ggml_tensor  * codes,
+        struct ggml_tensor  * signs,
+        struct ggml_tensor  * norms,
+        struct ggml_tensor  * dep,
+        int32_t               surface_kind,
+        int32_t               seed,
+        int32_t               layer_index,
+        int32_t               bits,
+        int32_t               dim,
+        int32_t               n_heads) {
+    GGML_ASSERT(row_map != NULL && row_map->type == GGML_TYPE_I32);
+    GGML_ASSERT(row_map->ne[0] == GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(codes != NULL);
+
+    const int64_t ne[4] = { dim, n_heads, row_map->ne[1], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F16, 4, ne);
+
+    int32_t flags = 0;
+    if (signs != NULL) {
+        flags |= GGML_TURBOQ_OP_FLAG_HAS_SIGNS;
+    }
+    if (norms != NULL) {
+        flags |= GGML_TURBOQ_OP_FLAG_HAS_NORMS;
+    }
+
+    const struct ggml_turboq_op_params params = ggml_make_turboq_op_params(
+            surface_kind, seed, layer_index, bits, dim, n_heads, flags);
+    ggml_set_op_params(result, &params, sizeof(params));
+
+    result->op     = GGML_OP_TURBOQ_ATTN_DECODE;
+    result->src[0] = row_map;
+    result->src[1] = codes;
+    result->src[2] = signs;
+    result->src[3] = norms;
+    result->src[4] = dep;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_turboq_attn_kcorr(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * row_map,
+        struct ggml_tensor  * signs,
+        struct ggml_tensor  * norms,
+        struct ggml_tensor  * dep,
+        int32_t               seed,
+        int32_t               layer_index,
+        int32_t               bits,
+        int32_t               dim,
+        int32_t               n_heads) {
+    GGML_ASSERT(q != NULL);
+    GGML_ASSERT(row_map != NULL && row_map->type == GGML_TYPE_I32);
+    GGML_ASSERT(row_map->ne[0] == GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(signs != NULL);
+    GGML_ASSERT(norms != NULL);
+
+    const int64_t ne[4] = { row_map->ne[1], q->ne[2], q->ne[1], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    const struct ggml_turboq_op_params params = ggml_make_turboq_op_params(
+            /*surface_kind =*/ 0, seed, layer_index, bits, dim, n_heads,
+            GGML_TURBOQ_OP_FLAG_HAS_SIGNS | GGML_TURBOQ_OP_FLAG_HAS_NORMS);
+    ggml_set_op_params(result, &params, sizeof(params));
+
+    result->op     = GGML_OP_TURBOQ_ATTN_KCORR;
+    result->src[0] = q;
+    result->src[1] = row_map;
+    result->src[2] = signs;
+    result->src[3] = norms;
+    result->src[4] = dep;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_turboq_recurrent_load(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * row_map,
+        struct ggml_tensor  * codes,
+        struct ggml_tensor  * norms,
+        int32_t               surface_kind,
+        int32_t               seed,
+        int32_t               layer_index,
+        int32_t               bits,
+        int32_t               dim) {
+    GGML_ASSERT(row_map != NULL && row_map->type == GGML_TYPE_I32);
+    GGML_ASSERT(row_map->ne[0] == GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(codes != NULL);
+    GGML_ASSERT(norms != NULL);
+
+    const int64_t ne[2] = { dim, row_map->ne[1] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
+
+    const struct ggml_turboq_op_params params = ggml_make_turboq_op_params(
+            surface_kind, seed, layer_index, bits, dim, 1, GGML_TURBOQ_OP_FLAG_HAS_NORMS);
+    ggml_set_op_params(result, &params, sizeof(params));
+
+    result->op     = GGML_OP_TURBOQ_RECURRENT_LOAD;
+    result->src[0] = row_map;
+    result->src[1] = codes;
+    result->src[2] = norms;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_turboq_recurrent_store(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * values,
+        struct ggml_tensor  * row_map,
+        struct ggml_tensor  * codes,
+        struct ggml_tensor  * norms,
+        int32_t               surface_kind,
+        int32_t               seed,
+        int32_t               layer_index,
+        int32_t               bits,
+        int32_t               dim) {
+    GGML_ASSERT(values != NULL);
+    GGML_ASSERT(row_map != NULL && row_map->type == GGML_TYPE_I32);
+    GGML_ASSERT(row_map->ne[0] == GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(codes != NULL);
+    GGML_ASSERT(norms != NULL);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+
+    const struct ggml_turboq_op_params params = ggml_make_turboq_op_params(
+            surface_kind, seed, layer_index, bits, dim, 1, GGML_TURBOQ_OP_FLAG_HAS_NORMS);
+    ggml_set_op_params(result, &params, sizeof(params));
+
+    result->op     = GGML_OP_TURBOQ_RECURRENT_STORE;
+    result->src[0] = values;
+    result->src[1] = row_map;
+    result->src[2] = codes;
+    result->src[3] = norms;
 
     return result;
 }

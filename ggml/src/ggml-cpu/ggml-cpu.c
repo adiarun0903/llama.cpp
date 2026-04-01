@@ -2031,6 +2031,22 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_gated_delta_net(params, tensor);
             } break;
+        case GGML_OP_TURBOQ_ATTN_DECODE:
+            {
+                ggml_compute_forward_turboq_attn_decode(params, tensor);
+            } break;
+        case GGML_OP_TURBOQ_ATTN_KCORR:
+            {
+                ggml_compute_forward_turboq_attn_kcorr(params, tensor);
+            } break;
+        case GGML_OP_TURBOQ_RECURRENT_LOAD:
+            {
+                ggml_compute_forward_turboq_recurrent_load(params, tensor);
+            } break;
+        case GGML_OP_TURBOQ_RECURRENT_STORE:
+            {
+                ggml_compute_forward_turboq_recurrent_store(params, tensor);
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2353,6 +2369,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_GATED_LINEAR_ATTN:
         case GGML_OP_RWKV_WKV7:
+        case GGML_OP_TURBOQ_ATTN_DECODE:
+        case GGML_OP_TURBOQ_ATTN_KCORR:
+        case GGML_OP_TURBOQ_RECURRENT_LOAD:
+        case GGML_OP_TURBOQ_RECURRENT_STORE:
             {
                 n_tasks = n_threads;
             } break;

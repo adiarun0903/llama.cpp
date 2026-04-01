@@ -19,11 +19,11 @@ struct ggml_tensor;
 struct llama_cparams;
 
 struct llama_memory_context_i;
+struct llama_memory_attn_recurrent_context_i;
 
 class llama_kv_cache_context;
 class llama_kv_cache_iswa_context;
-class llama_memory_recurrent_context;
-class llama_memory_hybrid_context;
+class llama_memory_recurrent_context_i;
 class llama_memory_hybrid_iswa_context;
 
 // certain models (typically multi-modal) can produce different types of graphs
@@ -224,13 +224,14 @@ public:
 
 class llm_graph_input_rs : public llm_graph_input_i {
 public:
-    llm_graph_input_rs(const llama_memory_recurrent_context * mctx) : mctx(mctx) {}
+    llm_graph_input_rs(const llama_memory_recurrent_context_i * mctx) : mctx(mctx) {}
     virtual ~llm_graph_input_rs() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
 
     bool can_reuse(const llm_graph_params & params) override;
 
+    ggml_tensor * row_map; // I32 [GGML_TURBOQ_ROW_FIELD_COUNT, n_rs]
     ggml_tensor * s_copy;  // I32 [n_rs]
 
     // views of s_copy, computed once per graph
@@ -238,7 +239,7 @@ public:
     ggml_tensor * s_copy_main;   // I32 [n_seqs]
     ggml_tensor * s_copy_extra;  // I32 [n_rs - n_seqs]
 
-    const llama_memory_recurrent_context * mctx;
+    const llama_memory_recurrent_context_i * mctx;
 
     // used in view offsets, need to match for valid graph reuse
     uint32_t head;
@@ -411,7 +412,7 @@ public:
             const llama_cparams & cparams,
             std::unique_ptr<llm_graph_input_attn_kv> inp_attn,
             std::unique_ptr<llm_graph_input_rs>      inp_rs,
-            const llama_memory_hybrid_context *      mctx) :
+            const llama_memory_attn_recurrent_context_i * mctx) :
         inp_attn(std::move(inp_attn)),
         inp_rs(std::move(inp_rs)),
         cparams(cparams),
@@ -430,7 +431,7 @@ public:
 
     const llama_cparams cparams;
 
-    const llama_memory_hybrid_context * mctx;
+    const llama_memory_attn_recurrent_context_i * mctx;
 };
 
 class llm_graph_input_mem_hybrid_k : public llm_graph_input_i {
@@ -439,7 +440,7 @@ public:
             const llama_cparams & cparams,
             std::unique_ptr<llm_graph_input_attn_k> inp_attn,
             std::unique_ptr<llm_graph_input_rs>      inp_rs,
-            const llama_memory_hybrid_context *      mctx) :
+            const llama_memory_attn_recurrent_context_i * mctx) :
         inp_attn(std::move(inp_attn)),
         inp_rs(std::move(inp_rs)),
         cparams(cparams),
@@ -458,7 +459,7 @@ public:
 
     const llama_cparams cparams;
 
-    const llama_memory_hybrid_context * mctx;
+    const llama_memory_attn_recurrent_context_i * mctx;
 };
 
 class llm_graph_input_mem_hybrid_iswa : public llm_graph_input_i {
@@ -869,12 +870,14 @@ struct llm_graph_context {
             ggml_tensor * q,       // [n_embd_head_q, n_head_q, n_tokens]
             ggml_tensor * k,       // [n_embd_head_k, n_head_k, n_tokens]
             ggml_tensor * v,       // [n_embd_head_v, n_head_v, n_tokens] (v_trans == false)
+            ggml_tensor * kq_corr,
             ggml_tensor * kq_b,
             ggml_tensor * kq_mask,
             ggml_tensor * sinks,   // [n_head_q]
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+                   bool   prefer_flash_attn = true) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
@@ -982,12 +985,28 @@ struct llm_graph_context {
                 int32_t   n_seqs,
             const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
 
+    ggml_tensor * build_recurrent_surface_load(
+        llm_graph_input_rs * inp,
+        const llama_ubatch & ubatch,
+                       int   il,
+                      bool   is_r,
+                   int32_t   dim) const;
+
+    ggml_tensor * build_recurrent_surface_store(
+        llm_graph_input_rs * inp,
+             ggml_tensor * state,
+        const llama_ubatch & ubatch,
+                       int   il,
+                      bool   is_r,
+                   int32_t   dim) const;
+
     ggml_tensor * build_rwkv_token_shift_load(
         llm_graph_input_rs * inp,
         const llama_ubatch & ubatch,
                        int   il) const;
 
     ggml_tensor * build_rwkv_token_shift_store(
+        llm_graph_input_rs * inp,
              ggml_tensor * token_shift,
       const llama_ubatch & ubatch,
                      int   il) const;

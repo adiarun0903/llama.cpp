@@ -142,12 +142,15 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    llama_context * ctx3 = nullptr;
+    llama_sampler * smpl3 = nullptr;
+
     // make new context
     auto params_ctx3 = common_context_params_to_llama(params);
     params_ctx3.n_seq_max = 2;
-    llama_context * ctx3 = llama_init_from_model(model, params_ctx3);
+    ctx3 = llama_init_from_model(model, params_ctx3);
 
-    llama_sampler * smpl3 = llama_sampler_chain_init(sparams);
+    smpl3 = llama_sampler_chain_init(sparams);
 
     llama_sampler_chain_add(smpl3, llama_sampler_init_dist(params.sampling.seed));
 
@@ -217,7 +220,9 @@ int main(int argc, char ** argv) {
 
     llama_sampler_free(smpl);
     llama_sampler_free(smpl2);
-    llama_sampler_free(smpl3);
+    if (smpl3) {
+        llama_sampler_free(smpl3);
+    }
 
     llama_batch_free(batch);
 
@@ -225,7 +230,9 @@ int main(int argc, char ** argv) {
     //llama_free(ctx);
 
     llama_free(ctx2);
-    llama_free(ctx3);
+    if (ctx3) {
+        llama_free(ctx3);
+    }
 
     if (result0 != result2) {
         fprintf(stderr, "\n%s : error : the seq restore generation is different\n", __func__);

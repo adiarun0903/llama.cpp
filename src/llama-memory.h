@@ -12,11 +12,15 @@ class llama_batch_allocr;
 
 class llama_io_write_i;
 class llama_io_read_i;
+class llama_kv_cache_context;
+class llama_memory_recurrent_context_i;
 
 struct llama_memory_params {
     // kv cache
     ggml_type type_k;
     ggml_type type_v;
+    llama_memory_codec memory_codec;
+    llama_turboq_memory_params turboq;
 
     // use full-size SWA cache
     bool swa_full;
@@ -62,6 +66,15 @@ struct llama_memory_context_i {
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;
+
+// helper interface for hybrid-style memory contexts that expose both
+// attention KV state and recurrent state to the graph builder.
+struct llama_memory_attn_recurrent_context_i {
+    virtual ~llama_memory_attn_recurrent_context_i() = default;
+
+    virtual const llama_kv_cache_context * get_attn() const = 0;
+    virtual const llama_memory_recurrent_context_i * get_recr() const = 0;
+};
 
 // general concept of LLM memory
 // the KV cache is a type of LLM memory, but there can be other types

@@ -559,6 +559,10 @@ extern "C" {
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
+        GGML_OP_TURBOQ_ATTN_DECODE,
+        GGML_OP_TURBOQ_ATTN_KCORR,
+        GGML_OP_TURBOQ_RECURRENT_LOAD,
+        GGML_OP_TURBOQ_RECURRENT_STORE,
 
         GGML_OP_UNARY,
 
@@ -603,6 +607,20 @@ extern "C" {
         GGML_UNARY_OP_TRUNC,
 
         GGML_UNARY_OP_COUNT,
+    };
+
+    enum ggml_turboq_row_field {
+        GGML_TURBOQ_ROW_FIELD_LOGICAL = 0,
+        GGML_TURBOQ_ROW_FIELD_SRC     = 1,
+        GGML_TURBOQ_ROW_FIELD_DST     = 2,
+        GGML_TURBOQ_ROW_FIELD_FLAGS   = 3,
+        GGML_TURBOQ_ROW_FIELD_COUNT   = 4,
+    };
+
+    enum ggml_turboq_row_flag {
+        GGML_TURBOQ_ROW_FLAG_HAS_SRC = 1u << 0,
+        GGML_TURBOQ_ROW_FLAG_HAS_DST = 1u << 1,
+        GGML_TURBOQ_ROW_FLAG_DIRTY   = 1u << 2,
     };
 
     enum ggml_glu_op {
@@ -2480,6 +2498,56 @@ extern "C" {
             struct ggml_tensor  * g,
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state);
+
+    GGML_API struct ggml_tensor * ggml_turboq_attn_decode(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * row_map,
+            struct ggml_tensor  * codes,
+            struct ggml_tensor  * signs,
+            struct ggml_tensor  * norms,
+            struct ggml_tensor  * dep,
+            int32_t               surface_kind,
+            int32_t               seed,
+            int32_t               layer_index,
+            int32_t               bits,
+            int32_t               dim,
+            int32_t               n_heads);
+
+    GGML_API struct ggml_tensor * ggml_turboq_attn_kcorr(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * row_map,
+            struct ggml_tensor  * signs,
+            struct ggml_tensor  * norms,
+            struct ggml_tensor  * dep,
+            int32_t               seed,
+            int32_t               layer_index,
+            int32_t               bits,
+            int32_t               dim,
+            int32_t               n_heads);
+
+    GGML_API struct ggml_tensor * ggml_turboq_recurrent_load(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * row_map,
+            struct ggml_tensor  * codes,
+            struct ggml_tensor  * norms,
+            int32_t               surface_kind,
+            int32_t               seed,
+            int32_t               layer_index,
+            int32_t               bits,
+            int32_t               dim);
+
+    GGML_API struct ggml_tensor * ggml_turboq_recurrent_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * values,
+            struct ggml_tensor  * row_map,
+            struct ggml_tensor  * codes,
+            struct ggml_tensor  * norms,
+            int32_t               surface_kind,
+            int32_t               seed,
+            int32_t               layer_index,
+            int32_t               bits,
+            int32_t               dim);
 
     // custom operators
 

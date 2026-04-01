@@ -137,6 +137,10 @@ int main(int argc, char ** argv) {
     const auto & params_spec = params.speculative;
 
     struct common_speculative * spec = common_speculative_init(params.speculative, ctx_tgt);
+    if (spec == nullptr) {
+        LOG_ERR("%s: failed to initialize speculative decoding context\n", __func__);
+        return 1;
+    }
 
     common_speculative_begin(spec, prompt_tgt);
 

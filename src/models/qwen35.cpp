@@ -199,8 +199,6 @@ ggml_tensor * llm_build_qwen35::build_layer_attn_linear(
         llm_graph_input_rs * inp,
         ggml_tensor *        cur,
         int                  il) {
-    const auto * mctx_cur = inp->mctx;
-
     const int64_t d_inner      = hparams.ssm_d_inner;
     const int64_t n_seqs       = ubatch.n_seqs;
     const int64_t head_k_dim   = hparams.ssm_d_state;
@@ -208,8 +206,6 @@ ggml_tensor * llm_build_qwen35::build_layer_attn_linear(
     const int64_t num_v_heads  = hparams.ssm_dt_rank;
     const int64_t head_v_dim   = d_inner / num_v_heads;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
-
-    const auto kv_head = mctx_cur->get_head();
 
     GGML_ASSERT(n_seqs != 0);
     GGML_ASSERT(ubatch.equal_seqs());
@@ -240,11 +236,11 @@ ggml_tensor * llm_build_qwen35::build_layer_attn_linear(
     gate = ggml_reshape_4d(ctx0, gate, 1, num_v_heads, n_seq_tokens, n_seqs);
 
     // Get convolution states from cache
-    ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
-    ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
-
-    // Build the convolution states tensor
-    ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv_states = build_recurrent_surface_load(
+            inp, ubatch,
+            il,
+            /*is_r=*/true,
+            hparams.n_embd_r());
     cb(conv_states, "conv_states", il);
 
     // Calculate convolution kernel size
@@ -268,14 +264,19 @@ ggml_tensor * llm_build_qwen35::build_layer_attn_linear(
                      conv_input->nb[2], (conv_input->ne[0] - conv_states->ne[0]) * ggml_element_size(conv_input));
     cb(last_conv_states, "last_conv_states", il);
 
-    ggml_tensor * state_update_target =
-        ggml_view_1d(ctx0, conv_states_all, (conv_kernel_size - 1) * conv_channels * n_seqs,
-                     kv_head * (conv_kernel_size - 1) * conv_channels * ggml_element_size(conv_states_all));
-    cb(state_update_target, "state_update_target", il);
+    ggml_build_forward_expand(gf, build_recurrent_surface_store(
+            inp,
+            last_conv_states,
+            ubatch,
+            il,
+            /*is_r=*/true,
+            hparams.n_embd_r()));
 
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, last_conv_states, state_update_target));
-
-    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
+    ggml_tensor * state = build_recurrent_surface_load(
+            inp, ubatch,
+            il,
+            /*is_r=*/false,
+            hparams.n_embd_s());
     state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
     cb(state, "state_predelta", il);
 
@@ -343,10 +344,13 @@ ggml_tensor * llm_build_qwen35::build_layer_attn_linear(
     cb(new_state, "new_state", il);
 
     // Update the recurrent states
-    ggml_build_forward_expand(gf,
-            ggml_cpy(ctx0, new_state,
-                ggml_view_1d(ctx0, ssm_states_all, hparams.n_embd_s() * n_seqs,
-                    kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
+    ggml_build_forward_expand(gf, build_recurrent_surface_store(
+            inp,
+            new_state,
+            ubatch,
+            il,
+            /*is_r=*/false,
+            hparams.n_embd_s()));
 
     // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
     ggml_tensor * z_2d = ggml_reshape_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs);

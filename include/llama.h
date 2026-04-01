@@ -190,6 +190,26 @@ extern "C" {
 
     LLAMA_API const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_type);
 
+    enum llama_memory_codec {
+        LLAMA_MEMORY_CODEC_LEGACY = 0,
+        LLAMA_MEMORY_CODEC_TURBOQ = 1,
+    };
+
+    enum llama_turboq_rotation_type {
+        LLAMA_TURBOQ_ROTATION_TYPE_HADAMARD_PERMUTE_SIGN = 0,
+    };
+
+    typedef struct llama_turboq_memory_params {
+        uint32_t attn_k_bits;          // stage-1 bitwidth for attention K
+        uint32_t attn_v_bits;          // stage-1 bitwidth for attention V
+        uint32_t recurrent_r_bits;     // stage-1 bitwidth for recurrent R
+        uint32_t recurrent_s_bits;     // stage-1 bitwidth for recurrent S
+        uint32_t attn_k_residual_bits; // residual sketch bitwidth for attention K
+        uint32_t seed;                 // deterministic seed for structured rotations
+
+        enum llama_turboq_rotation_type rotation;
+    } llama_turboq_memory_params;
+
     enum llama_split_mode {
         LLAMA_SPLIT_MODE_NONE  = 0, // single GPU
         LLAMA_SPLIT_MODE_LAYER = 1, // split layers and KV across GPUs
@@ -352,8 +372,10 @@ extern "C" {
         ggml_backend_sched_eval_callback cb_eval;
         void * cb_eval_user_data;
 
-        enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
-        enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+        enum ggml_type type_k; // data type for legacy K cache [EXPERIMENTAL]
+        enum ggml_type type_v; // data type for legacy V cache [EXPERIMENTAL]
+        enum llama_memory_codec memory_codec; // runtime memory codec [EXPERIMENTAL]
+        struct llama_turboq_memory_params turboq; // TurboQ memory codec params [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
