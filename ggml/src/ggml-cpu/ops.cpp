@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "../ggml-turboq.hpp"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -11,6 +12,288 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <vector>
+
+static inline const ggml_turboq_op_params * ggml_turboq_get_op_params(const ggml_tensor * tensor) {
+    return reinterpret_cast<const ggml_turboq_op_params *>(tensor->op_params);
+}
+
+static inline float ggml_turboq_tensor_get_f32(const ggml_tensor * tensor, int64_t i0, int64_t i1, int64_t i2, int64_t i3 = 0) {
+    const char * base = reinterpret_cast<const char *>(tensor->data) + i0*tensor->nb[0] + i1*tensor->nb[1] + i2*tensor->nb[2] + i3*tensor->nb[3];
+
+    switch (tensor->type) {
+        case GGML_TYPE_F32:
+            return *reinterpret_cast<const float *>(base);
+        case GGML_TYPE_F16:
+            return ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t *>(base));
+        case GGML_TYPE_BF16:
+            return ggml_bf16_to_fp32(*reinterpret_cast<const ggml_bf16_t *>(base));
+        default:
+            GGML_ABORT("fatal error");
+    }
+}
+
+static inline void ggml_turboq_tensor_set_f32(ggml_tensor * tensor, int64_t i0, int64_t i1, int64_t i2, int64_t i3, float value) {
+    char * base = reinterpret_cast<char *>(tensor->data) + i0*tensor->nb[0] + i1*tensor->nb[1] + i2*tensor->nb[2] + i3*tensor->nb[3];
+    *reinterpret_cast<float *>(base) = value;
+}
+
+static inline void ggml_turboq_tensor_set_f16(ggml_tensor * tensor, int64_t i0, int64_t i1, int64_t i2, int64_t i3, float value) {
+    char * base = reinterpret_cast<char *>(tensor->data) + i0*tensor->nb[0] + i1*tensor->nb[1] + i2*tensor->nb[2] + i3*tensor->nb[3];
+    *reinterpret_cast<ggml_fp16_t *>(base) = ggml_fp32_to_fp16(value);
+}
+
+static inline int32_t ggml_turboq_row_map_get(const ggml_tensor * row_map, int32_t field, int64_t row) {
+    GGML_ASSERT(row_map->type == GGML_TYPE_I32);
+    GGML_ASSERT(row_map->ne[0] == GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(field >= 0 && field < GGML_TURBOQ_ROW_FIELD_COUNT);
+    GGML_ASSERT(row >= 0 && row < row_map->ne[1]);
+
+    const char * base = reinterpret_cast<const char *>(row_map->data) + field*row_map->nb[0] + row*row_map->nb[1];
+    return *reinterpret_cast<const int32_t *>(base);
+}
+
+static inline bool ggml_turboq_row_has_src(const ggml_tensor * row_map, int64_t row) {
+    return (ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_FLAGS, row) & GGML_TURBOQ_ROW_FLAG_HAS_SRC) != 0;
+}
+
+static inline bool ggml_turboq_row_has_dst(const ggml_tensor * row_map, int64_t row) {
+    return (ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_FLAGS, row) & GGML_TURBOQ_ROW_FLAG_HAS_DST) != 0;
+}
+
+static inline const uint8_t * ggml_turboq_head_bytes(const ggml_tensor * tensor, int64_t row, int64_t head) {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(row >= 0 && row < tensor->ne[2]);
+    GGML_ASSERT(head >= 0 && head < tensor->ne[1]);
+
+    return reinterpret_cast<const uint8_t *>(reinterpret_cast<const char *>(tensor->data) + row*tensor->nb[2] + head*tensor->nb[1]);
+}
+
+static inline uint8_t * ggml_turboq_row_bytes(ggml_tensor * tensor, int64_t row) {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(row >= 0 && row < tensor->ne[1]);
+
+    return reinterpret_cast<uint8_t *>(reinterpret_cast<char *>(tensor->data) + row*tensor->nb[1]);
+}
+
+static inline const uint8_t * ggml_turboq_row_bytes(const ggml_tensor * tensor, int64_t row) {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(row >= 0 && row < tensor->ne[1]);
+
+    return reinterpret_cast<const uint8_t *>(reinterpret_cast<const char *>(tensor->data) + row*tensor->nb[1]);
+}
+
+static inline ggml_fp16_t * ggml_turboq_norm_ptr(ggml_tensor * tensor, int64_t row, int64_t head = 0) {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(tensor->type == GGML_TYPE_F16);
+    GGML_ASSERT(head >= 0 && head < tensor->ne[0]);
+    GGML_ASSERT(row >= 0 && row < tensor->ne[1]);
+
+    return reinterpret_cast<ggml_fp16_t *>(reinterpret_cast<char *>(tensor->data) + head*tensor->nb[0] + row*tensor->nb[1]);
+}
+
+static inline const ggml_fp16_t * ggml_turboq_norm_ptr(const ggml_tensor * tensor, int64_t row, int64_t head = 0) {
+    GGML_ASSERT(tensor != nullptr);
+    GGML_ASSERT(tensor->type == GGML_TYPE_F16);
+    GGML_ASSERT(head >= 0 && head < tensor->ne[0]);
+    GGML_ASSERT(row >= 0 && row < tensor->ne[1]);
+
+    return reinterpret_cast<const ggml_fp16_t *>(reinterpret_cast<const char *>(tensor->data) + head*tensor->nb[0] + row*tensor->nb[1]);
+}
+
+void ggml_compute_forward_turboq_attn_decode(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * row_map = dst->src[0];
+    const ggml_tensor * codes   = dst->src[1];
+
+    GGML_ASSERT(row_map != nullptr);
+    GGML_ASSERT(codes != nullptr);
+    GGML_ASSERT(dst->type == GGML_TYPE_F16);
+
+    const auto * op = ggml_turboq_get_op_params(dst);
+    const auto kind = static_cast<llama_turboq::surface_kind>(op->surface_kind);
+    const auto plan = llama_turboq::make_rotation_plan(op->seed, kind, op->layer_index, op->dim);
+    const auto & codebook = llama_turboq::get_codebook(op->bits);
+
+    GGML_ASSERT(op->dim == dst->ne[0]);
+    GGML_ASSERT(op->n_heads == dst->ne[1]);
+    GGML_ASSERT(row_map->ne[1] == dst->ne[2]);
+    GGML_ASSERT(codes->ne[0] == (int64_t) llama_turboq::bitpacked_bytes(plan.padded_dim, op->bits));
+    GGML_ASSERT(codes->ne[1] == op->n_heads);
+
+    const int64_t total = dst->ne[1] * dst->ne[2];
+    const int64_t start = (total * params->ith) / params->nth;
+    const int64_t end   = (total * (params->ith + 1)) / params->nth;
+
+    std::vector<float> decoded(op->dim, 0.0f);
+
+    for (int64_t index = start; index < end; ++index) {
+        const int64_t row  = index / dst->ne[1];
+        const int64_t head = index % dst->ne[1];
+        const int32_t src_row = ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_SRC, row);
+
+        if (!ggml_turboq_row_has_src(row_map, row) || src_row < 0 || src_row >= codes->ne[2]) {
+            for (int64_t d = 0; d < dst->ne[0]; ++d) {
+                ggml_turboq_tensor_set_f16(dst, d, head, row, 0, 0.0f);
+            }
+            continue;
+        }
+
+        llama_turboq::decode_stage1_codes(plan, codebook, ggml_turboq_head_bytes(codes, src_row, head), decoded.data());
+        for (int64_t d = 0; d < dst->ne[0]; ++d) {
+            ggml_turboq_tensor_set_f16(dst, d, head, row, 0, decoded[d]);
+        }
+    }
+}
+
+void ggml_compute_forward_turboq_attn_kcorr(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * q       = dst->src[0];
+    const ggml_tensor * row_map = dst->src[1];
+    const ggml_tensor * signs   = dst->src[2];
+    const ggml_tensor * norms   = dst->src[3];
+
+    GGML_ASSERT(q != nullptr);
+    GGML_ASSERT(row_map != nullptr);
+    GGML_ASSERT(signs != nullptr);
+    GGML_ASSERT(norms != nullptr);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const auto * op = ggml_turboq_get_op_params(dst);
+    const auto plan = llama_turboq::make_rotation_plan(op->seed, llama_turboq::surface_kind::attn_k, op->layer_index, op->dim);
+
+    GGML_ASSERT(q->ne[0] == op->dim);
+    GGML_ASSERT(row_map->ne[1] == dst->ne[0]);
+    GGML_ASSERT(signs->ne[0] == (int64_t) llama_turboq::bitpacked_bytes(plan.padded_dim, 1));
+    GGML_ASSERT(signs->ne[1] == op->n_heads);
+    GGML_ASSERT(norms->ne[0] == op->n_heads);
+
+    const int64_t total = q->ne[1] * q->ne[2];
+    const int64_t start = (total * params->ith) / params->nth;
+    const int64_t end   = (total * (params->ith + 1)) / params->nth;
+
+    const int64_t n_gqa = std::max<int64_t>(1, q->ne[1] / std::max<int32_t>(1, op->n_heads));
+    const float sketch_scale = 1.0f / std::sqrt(float(plan.padded_dim));
+
+    std::vector<float> src(op->dim, 0.0f);
+    std::vector<float> rotated_q;
+
+    for (int64_t pair = start; pair < end; ++pair) {
+        const int64_t token   = pair / q->ne[1];
+        const int64_t q_head  = pair % q->ne[1];
+        const int64_t kv_head = q_head / n_gqa;
+
+        for (int64_t d = 0; d < q->ne[0]; ++d) {
+            src[d] = ggml_turboq_tensor_get_f32(q, d, q_head, token);
+        }
+
+        llama_turboq::rotate_vector(plan, src.data(), rotated_q);
+
+        for (int64_t row = 0; row < row_map->ne[1]; ++row) {
+            const int32_t src_row = ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_SRC, row);
+            float corr = 0.0f;
+
+            if (ggml_turboq_row_has_src(row_map, row) && src_row >= 0 && src_row < signs->ne[2]) {
+                const float norm = ggml_fp16_to_fp32(*ggml_turboq_norm_ptr(norms, src_row, kv_head));
+                if (norm > 0.0f) {
+                    const uint8_t * sign_row = ggml_turboq_head_bytes(signs, src_row, kv_head);
+                    float dot = 0.0f;
+                    for (uint32_t i = 0; i < plan.padded_dim; ++i) {
+                        dot += rotated_q[i] * llama_turboq::get_sign_value(sign_row, i);
+                    }
+                    corr = norm * dot * sketch_scale;
+                }
+            }
+
+            ggml_turboq_tensor_set_f32(dst, row, token, q_head, 0, corr);
+        }
+    }
+}
+
+void ggml_compute_forward_turboq_recurrent_load(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * row_map = dst->src[0];
+    const ggml_tensor * codes   = dst->src[1];
+    const ggml_tensor * norms   = dst->src[2];
+
+    GGML_ASSERT(row_map != nullptr);
+    GGML_ASSERT(codes != nullptr);
+    GGML_ASSERT(norms != nullptr);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const auto * op = ggml_turboq_get_op_params(dst);
+    const auto kind = static_cast<llama_turboq::surface_kind>(op->surface_kind);
+    const auto plan = llama_turboq::make_rotation_plan(op->seed, kind, op->layer_index, op->dim);
+    const auto & codebook = llama_turboq::get_codebook(op->bits);
+
+    GGML_ASSERT(dst->ne[0] == op->dim);
+    GGML_ASSERT(dst->ne[1] == row_map->ne[1]);
+    GGML_ASSERT(codes->ne[0] == (int64_t) llama_turboq::bitpacked_bytes(plan.padded_dim, op->bits));
+    GGML_ASSERT(norms->ne[0] == 1);
+
+    const int64_t start = (dst->ne[1] * params->ith) / params->nth;
+    const int64_t end   = (dst->ne[1] * (params->ith + 1)) / params->nth;
+
+    std::vector<float> decoded(op->dim, 0.0f);
+
+    for (int64_t row = start; row < end; ++row) {
+        const int32_t src_row = ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_SRC, row);
+
+        if (!ggml_turboq_row_has_src(row_map, row) || src_row < 0 || src_row >= codes->ne[1]) {
+            for (int64_t d = 0; d < dst->ne[0]; ++d) {
+                ggml_turboq_tensor_set_f32(dst, d, row, 0, 0, 0.0f);
+            }
+            continue;
+        }
+
+        llama_turboq::decode_stage1_normed(plan, codebook, ggml_turboq_row_bytes(codes, src_row), ggml_fp16_to_fp32(*ggml_turboq_norm_ptr(norms, src_row)), decoded.data());
+        for (int64_t d = 0; d < dst->ne[0]; ++d) {
+            ggml_turboq_tensor_set_f32(dst, d, row, 0, 0, decoded[d]);
+        }
+    }
+}
+
+void ggml_compute_forward_turboq_recurrent_store(const ggml_compute_params * params, ggml_tensor * dst) {
+    ggml_tensor * values  = dst->src[0];
+    const ggml_tensor * row_map = dst->src[1];
+    ggml_tensor * codes   = dst->src[2];
+    ggml_tensor * norms   = dst->src[3];
+
+    GGML_ASSERT(values != nullptr);
+    GGML_ASSERT(row_map != nullptr);
+    GGML_ASSERT(codes != nullptr);
+    GGML_ASSERT(norms != nullptr);
+    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+
+    const auto * op = ggml_turboq_get_op_params(dst);
+    const auto kind = static_cast<llama_turboq::surface_kind>(op->surface_kind);
+    const auto plan = llama_turboq::make_rotation_plan(op->seed, kind, op->layer_index, op->dim);
+    const auto & codebook = llama_turboq::get_codebook(op->bits);
+
+    GGML_ASSERT(values->ne[0] == op->dim);
+    GGML_ASSERT(values->ne[1] == row_map->ne[1]);
+    GGML_ASSERT(codes->ne[0] == (int64_t) llama_turboq::bitpacked_bytes(plan.padded_dim, op->bits));
+    GGML_ASSERT(norms->ne[0] == 1);
+
+    const int64_t start = (values->ne[1] * params->ith) / params->nth;
+    const int64_t end   = (values->ne[1] * (params->ith + 1)) / params->nth;
+
+    std::vector<float> src(op->dim, 0.0f);
+
+    for (int64_t row = start; row < end; ++row) {
+        const int32_t dst_row = ggml_turboq_row_map_get(row_map, GGML_TURBOQ_ROW_FIELD_DST, row);
+        if (!ggml_turboq_row_has_dst(row_map, row) || dst_row < 0 || dst_row >= codes->ne[1]) {
+            continue;
+        }
+
+        for (int64_t d = 0; d < values->ne[0]; ++d) {
+            src[d] = ggml_turboq_tensor_get_f32(values, d, row, 0);
+        }
+
+        llama_turboq::encode_stage1_normed(plan, codebook, src.data(), ggml_turboq_row_bytes(codes, dst_row), ggml_turboq_norm_ptr(norms, dst_row));
+    }
+
+    if (params->ith == 0) {
+        *reinterpret_cast<int32_t *>(dst->data) = 1;
+    }
+}
 
 // ggml_compute_forward_dup
 

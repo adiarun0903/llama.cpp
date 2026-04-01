@@ -21,11 +21,14 @@ add_library(llama
             llama-impl.cpp
             llama-io.cpp
             llama-kv-cache.cpp
+            llama-kv-cache-turboq.cpp
             llama-kv-cache-iswa.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-hybrid-iswa.cpp
             llama-memory-recurrent.cpp
+            llama-memory-turboq.cpp
+            llama-turboq-codec.cpp
             llama-mmap.cpp
             llama-model-loader.cpp
             llama-model-saver.cpp

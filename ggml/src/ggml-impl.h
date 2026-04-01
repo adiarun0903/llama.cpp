@@ -192,6 +192,22 @@ struct ggml_custom_op_params {
     void           * userdata;
 };
 
+enum ggml_turboq_op_flag {
+    GGML_TURBOQ_OP_FLAG_HAS_SIGNS = 1u << 0,
+    GGML_TURBOQ_OP_FLAG_HAS_NORMS = 1u << 1,
+};
+
+struct ggml_turboq_op_params {
+    int32_t layout_version;
+    int32_t surface_kind;
+    int32_t seed;
+    int32_t layer_index;
+    int32_t bits;
+    int32_t dim;
+    int32_t n_heads;
+    int32_t flags;
+};
+
 // bitset
 
 typedef uint32_t ggml_bitset_t;
