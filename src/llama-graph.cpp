@@ -588,7 +588,13 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
     const auto * mctx = dynamic_cast<const llama_memory_attn_recurrent_context_i *>(params.mctx);
     GGML_ASSERT(mctx != nullptr);
 
-    const void * prev_reuse_key = this->mctx ? this->mctx->get_recr()->graph_reuse_key() : nullptr;
+    const auto * prev_mctx = this->mctx;
+    const bool same_mctx = static_cast<const void *>(prev_mctx) == static_cast<const void *>(params.mctx);
+    const void * prev_reuse_key = nullptr;
+    if (same_mctx && prev_mctx != nullptr) {
+        prev_reuse_key = prev_mctx->get_recr()->graph_reuse_key();
+    }
+
     this->mctx = mctx;
 
     bool res = true;
@@ -608,6 +614,7 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
+    res &= same_mctx;
     res &= prev_reuse_key == mctx->get_recr()->graph_reuse_key();
 
     return res;
@@ -627,7 +634,13 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
     const auto * mctx = dynamic_cast<const llama_memory_attn_recurrent_context_i *>(params.mctx);
     GGML_ASSERT(mctx != nullptr);
 
-    const void * prev_reuse_key = this->mctx ? this->mctx->get_recr()->graph_reuse_key() : nullptr;
+    const auto * prev_mctx = this->mctx;
+    const bool same_mctx = static_cast<const void *>(prev_mctx) == static_cast<const void *>(params.mctx);
+    const void * prev_reuse_key = nullptr;
+    if (same_mctx && prev_mctx != nullptr) {
+        prev_reuse_key = prev_mctx->get_recr()->graph_reuse_key();
+    }
+
     this->mctx = mctx;
 
     bool res = true;
@@ -646,6 +659,7 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
 
     res &= inp_rs->head == mctx->get_recr()->get_head();
     res &= inp_rs->rs_z == mctx->get_recr()->get_rs_z();
+    res &= same_mctx;
     res &= prev_reuse_key == mctx->get_recr()->graph_reuse_key();
 
     return res;
