@@ -89,7 +89,7 @@ private:
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
 };
 
-class llama_memory_hybrid_context : public llama_memory_context_i {
+class llama_memory_hybrid_context : public llama_memory_context_i, public llama_memory_attn_recurrent_context_i {
 public:
     using slot_info_vec_t = llama_kv_cache::slot_info_vec_t;
 
@@ -123,8 +123,8 @@ public:
     // llama_memory_hybrid_context
     //
 
-    const llama_kv_cache_context * get_attn() const;
-    const llama_memory_recurrent_context * get_recr() const;
+    const llama_kv_cache_context * get_attn() const override;
+    const llama_memory_recurrent_context_i * get_recr() const override;
 
 private:
     // the index of the next ubatch to process

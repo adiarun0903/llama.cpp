@@ -33,7 +33,8 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
                                                          ggml_tensor *        x_prev,
                                                          const llama_ubatch & ubatch,
                                                          int                  il) const {
-    const auto * mctx_cur = static_cast<const llama_memory_recurrent_context *>(mctx);
+    const auto * mctx_cur = dynamic_cast<const llama_memory_recurrent_context_i *>(mctx);
+    GGML_ASSERT(mctx_cur != nullptr);
 
     const auto n_tokens     = ubatch.n_tokens;
     const auto n_seqs       = ubatch.n_seqs;
@@ -130,7 +131,24 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
         // k = k * (1 - w)
         k = ggml_sub(ctx0, k, ggml_mul(ctx0, k, w));
     }
-    ggml_tensor * wkv_state = build_rs(inp, mctx_cur->get_s_l(il), hparams.n_embd_s(), n_seqs);
+    ggml_tensor * wkv_state = nullptr;
+    llama_memory_recurrent_context_i::turboq_surface turboq;
+    if (mctx_cur->turboq_get_surface(il, /*is_r=*/false, turboq)) {
+        GGML_ASSERT(turboq.dim == int32_t(hparams.n_embd_s()));
+        ggml_tensor * row_map = ggml_view_2d(ctx0, inp->row_map, GGML_TURBOQ_ROW_FIELD_COUNT, n_seqs, inp->row_map->nb[1], 0);
+        wkv_state = ggml_turboq_recurrent_load(
+                ctx0,
+                row_map,
+                turboq.codes,
+                turboq.norms,
+                turboq.surface_kind,
+                turboq.seed,
+                turboq.layer_index,
+                turboq.bits,
+                turboq.dim);
+    } else {
+        wkv_state = build_rs(inp, mctx_cur->get_s_l(il), hparams.n_embd_s(), n_seqs);
+    }
 
     ggml_tensor * wkv_output;
     if (is_qrwkv) {
@@ -141,10 +159,26 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
     cur       = ggml_view_1d(ctx0, wkv_output, n_embd * n_tokens, 0);
     wkv_state = ggml_view_1d(ctx0, wkv_output, n_embd * head_size * n_seqs, n_embd * n_tokens * sizeof(float));
 
-    ggml_build_forward_expand(
-        gf, ggml_cpy(ctx0, wkv_state,
-                     ggml_view_1d(ctx0, mctx_cur->get_s_l(il), hparams.n_embd_s() * n_seqs,
-                                  hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il)))));
+    if (mctx_cur->turboq_get_surface(il, /*is_r=*/false, turboq)) {
+        ggml_tensor * row_map = ggml_view_2d(ctx0, inp->row_map, GGML_TURBOQ_ROW_FIELD_COUNT, n_seqs, inp->row_map->nb[1], 0);
+        mctx_cur->turboq_mark_store_surface(il, /*is_r=*/false);
+        ggml_build_forward_expand(gf, ggml_turboq_recurrent_store(
+                ctx0,
+                wkv_state,
+                row_map,
+                turboq.codes,
+                turboq.norms,
+                turboq.surface_kind,
+                turboq.seed,
+                turboq.layer_index,
+                turboq.bits,
+                turboq.dim));
+    } else {
+        ggml_build_forward_expand(
+            gf, ggml_cpy(ctx0, wkv_state,
+                         ggml_view_1d(ctx0, mctx_cur->get_s_l(il), hparams.n_embd_s() * n_seqs,
+                                      hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il)))));
+    }
 
     if (!is_qrwkv) {
         // group norm with head_count groups

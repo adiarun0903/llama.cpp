@@ -270,6 +270,6 @@ const llama_kv_cache_iswa_context * llama_memory_hybrid_iswa_context::get_attn()
     return static_cast<const llama_kv_cache_iswa_context *>(ctx_attn.get());
 }
 
-const llama_memory_recurrent_context * llama_memory_hybrid_iswa_context::get_recr() const {
-    return static_cast<const llama_memory_recurrent_context *>(ctx_recr.get());
+const llama_memory_recurrent_context_i * llama_memory_hybrid_iswa_context::get_recr() const {
+    return dynamic_cast<const llama_memory_recurrent_context_i *>(ctx_recr.get());
 }
