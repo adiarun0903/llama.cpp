@@ -2,7 +2,7 @@
 
 Date: 2026-03-31
 Branch: `turboq/v1-rebase-port`
-Head: `2a67da061`
+Head: `turboq/v1-rebase-port` (post-rebase port + stabilization)
 
 ## Scope
 
@@ -21,13 +21,15 @@ Implemented per v1 CPU-first plan:
 4. `8ea5a544d` turboq: wire turboq state i/o into save-load and speculative examples
 5. `28c3f4a21` turboq: add tests docs and benchmark harness
 6. `2a67da061` turboq: fix recurrent surface paths and benchmark harness compatibility
+7. (current branch) hybrid graph reuse guard + gate harness expected-unsupported handling + updated gate report
 
 ## Model Availability (Gate Inputs)
 
 - Qwen3.5 GGUF: available
   - `~/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-Q4_K_L.gguf`
-- gpt-oss-20b GGUF: **not present locally**
-  - only safetensors found at `~/.lmstudio/models/mlx-community/gpt-oss-20b-MXFP4-Q8/`
+- gpt-oss-20b GGUF: available
+  - `~/.lmstudio/models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf`
+  - source: `ggml-org/gpt-oss-20b-GGUF`
 
 ## Test Status
 
@@ -39,6 +41,7 @@ Passed:
 
 Notes:
 - Hybrid/recurrent path fixes were required in `llama-graph.cpp` plus model recurrent call-site updates (`mamba-base.cpp`, `lfm2.cpp`, `plamo2.cpp`).
+- Additional stabilization fix applied for hybrid graph reuse checks in `llama-graph.cpp` to prevent stale-context dereference in long generation runs.
 
 ## Qwen Smoke Metrics (n=1 token, fixed seed, flash-attn on, no warmup)
 
@@ -55,18 +58,42 @@ Interpretation:
 - TurboQ reduces context-memory footprint vs legacy f16/q8/q4 in this smoke configuration.
 - Throughput is currently below f16/q8 in this run shape.
 
-## Blocking Issues for Full Acceptance Gate
+## Long-Run Stability Check (Qwen, n_predict=128)
 
-1. `gpt-oss` hard gate cannot run without a GGUF artifact.
-2. Longer generation runs (`n_predict=16` and above) are unstable/intermittent on this branch for some modes (segfault observed in benchmark flow).
-3. Perplexity delta gate (`<= 1%`) has not been completed with the intended benchmark matrix.
+- Command:
+  - `scripts/bench-turboq-kv.sh --model ...Qwen3.5-35B-A3B-UD-Q4_K_L.gguf --n-predict 128 --ctx-size 2048 --flash-attn on`
+- Outcome:
+  - **No segfault after hybrid can_reuse guard fix**.
+  - All four modes completed in one pass (`legacy-f16`, `legacy-q8_0`, `legacy-q4_0`, `turboq-3bit`).
+- Artifacts:
+  - `/tmp/qwen-gate-run-fix1`
+
+## gpt-oss Gate (SWA / unsupported TurboQ variant)
+
+- Command:
+  - `scripts/bench-turboq-kv.sh --model ...gpt-oss-20b-mxfp4.gguf --n-predict 16 --ctx-size 2048 --flash-attn on`
+- Outcome:
+  - `legacy-f16`, `legacy-q8_0`, `legacy-q4_0` complete.
+  - `turboq-3bit` returns explicit fail-fast:
+    - `TurboQ v2 does not support sliding-window attention cache variants`
+  - Harness now marks this as `EXPECTED_UNSUPPORTED` and keeps logs/reports instead of aborting.
+- Artifacts:
+  - `/tmp/gptoss-gate-run-fix1`
+
+## Acceptance Status
+
+- Supported-v1 target (dense + hybrid recurrent without SWA/MLA): **green on Qwen long-run path**.
+- Unsupported architecture policy: **verified fail-fast on gpt-oss SWA path**.
+- Full quality gate remains **partial**:
+  - Perplexity delta (`<= 1%`) not yet executed in this report.
+  - Fixed prompt quality review still smoke-level only.
 
 ## Plan Impact
 
-The integration plan is implemented as code + tests + harness on top of latest upstream master, but **acceptance gate is not yet green** due missing model artifact and runtime instability under longer runs.
+The rebase-and-port plan is implemented with runtime stability fixes and gate harness updates. CPU-first v1 behavior is now consistent with scope: supported paths run, unsupported SWA path fails fast with clear messaging.
 
 ## Immediate Next Steps
 
-1. Provide/convert `gpt-oss` GGUF and rerun matrix.
-2. Stabilize long-run generation path (repro harness retained in `scripts/bench-turboq-kv.sh`).
-3. Complete perplexity sweep and fixed prompt quality sanity set, then finalize release tag.
+1. Run perplexity matrix for Qwen baseline vs TurboQ (`legacy f16/q8_0/q4_0` vs `turboq 3b/3b`) and attach numeric deltas.
+2. Execute fixed prompt quality set for final sign-off notes.
+3. Keep SWA/MLA TurboQ support in phase-2 backlog (`docs/development/turboq-phase2-backlog.md`).

@@ -145,6 +145,7 @@ run_cli_case() {
         completion_mode_args+=(-no-cnv)
     fi
     echo "==> ${name} ($(basename "$CLI_BIN"))"
+    set +e
     "$CLI_BIN" \
         "${COMMON_ARGS[@]}" \
         -p "$PROMPT" \
@@ -153,6 +154,19 @@ run_cli_case() {
         --temp "$TEMPERATURE" \
         "$@" \
         > "$log_path" 2>&1
+    local rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]]; then
+        if rg -q "TurboQ v2 does not support sliding-window attention cache variants" "$log_path"; then
+            echo "EXPECTED_UNSUPPORTED: ${name} (TurboQ + SWA model)"
+            tail -n 40 "$log_path"
+            return 0
+        fi
+        tail -n 80 "$log_path"
+        return $rc
+    fi
+
     tail -n 40 "$log_path"
 }
 
